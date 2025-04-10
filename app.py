@@ -7,6 +7,11 @@ import logging
 import tempfile
 import os
 
+# OCR imports
+import pytesseract
+from pdf2image import convert_from_bytes
+from PIL import Image
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -21,8 +26,44 @@ def home():
         "status": "online",
         "message": "PDF Extraction API is running",
         "usage": "Send a POST request to /extract-pdf with a base64-encoded PDF",
-        "version": "1.0.0"
+        "features": ["Regular text extraction", "OCR for scanned documents"],
+        "version": "1.1.0"
     })
+
+def extract_text_with_ocr(pdf_bytes):
+    """Extract text from PDF using OCR"""
+    logger.info("Starting OCR extraction process")
+    text = ""
+    
+    try:
+        # Create temporary directory for images
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Convert PDF to images
+            logger.info("Converting PDF to images")
+            images = convert_from_bytes(
+                pdf_bytes, 
+                output_folder=temp_dir,
+                fmt="jpeg",
+                dpi=300
+            )
+            
+            logger.info(f"Converted {len(images)} pages to images")
+            
+            # Process each image with OCR
+            for i, image in enumerate(images):
+                logger.info(f"Processing page {i+1} with OCR")
+                # Use pytesseract to extract text
+                page_text = pytesseract.image_to_string(image)
+                if page_text:
+                    text += page_text + "\n\n"
+                else:
+                    logger.warning(f"No text extracted from page {i+1} with OCR")
+            
+            logger.info(f"OCR extraction complete, found {len(text)} characters")
+            return text
+    except Exception as e:
+        logger.error(f"Error in OCR process: {e}")
+        raise e
 
 @app.route('/extract-pdf', methods=['POST'])
 def extract_pdf():
@@ -38,7 +79,10 @@ def extract_pdf():
             logger.error("No PDF data found in request")
             return jsonify({"error": "No PDF data found in request"}), 400
         
-        logger.info("Received PDF extraction request. Processing...")
+        # Get OCR preference (default to auto)
+        ocr_mode = request.json.get('ocr_mode', 'auto')  # Options: 'auto', 'force', 'disable'
+        
+        logger.info(f"Received PDF extraction request. OCR mode: {ocr_mode}. Processing...")
         
         try:
             # Decode the base64 string
@@ -47,59 +91,65 @@ def extract_pdf():
             logger.error(f"Failed to decode base64: {e}")
             return jsonify({"error": "Invalid base64 encoding"}), 400
         
-        # Extract text using PyPDF2
-        text = ""
+        # Extract text using PyPDF2 (without OCR)
+        regular_text = ""
+        ocr_text = ""
+        used_ocr = False
         
-        # Method 1: Using BytesIO (memory-based)
-        try:
-            pdf_file = io.BytesIO(pdf_bytes)
-            reader = PyPDF2.PdfReader(pdf_file)
-            
-            logger.info(f"PDF has {len(reader.pages)} pages")
-            
-            for i, page in enumerate(reader.pages):
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n\n"
-                else:
-                    logger.warning(f"No text extracted from page {i+1}")
-        
-        except Exception as e:
-            # If Method 1 fails, try Method 2 with temporary file
-            logger.warning(f"BytesIO method failed: {e}. Trying temp file method.")
-            
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_pdf:
-                temp_pdf.write(pdf_bytes)
-                temp_path = temp_pdf.name
-            
+        # Standard text extraction
+        if ocr_mode != 'force':
             try:
-                with open(temp_path, 'rb') as file:
-                    reader = PyPDF2.PdfReader(file)
-                    logger.info(f"PDF has {len(reader.pages)} pages (temp file method)")
-                    
-                    for i, page in enumerate(reader.pages):
-                        page_text = page.extract_text()
-                        if page_text:
-                            text += page_text + "\n\n"
-                        else:
-                            logger.warning(f"No text extracted from page {i+1}")
-            finally:
-                # Clean up temp file
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+                pdf_file = io.BytesIO(pdf_bytes)
+                reader = PyPDF2.PdfReader(pdf_file)
+                
+                logger.info(f"PDF has {len(reader.pages)} pages")
+                
+                for i, page in enumerate(reader.pages):
+                    page_text = page.extract_text()
+                    if page_text:
+                        regular_text += page_text + "\n\n"
+                    else:
+                        logger.warning(f"No text extracted from page {i+1}")
+                
+                logger.info(f"Regular extraction found {len(regular_text)} characters")
+            except Exception as e:
+                logger.warning(f"Regular extraction failed: {e}")
         
-        if not text.strip():
+        # Decide if OCR is needed
+        should_use_ocr = (
+            ocr_mode == 'force' or 
+            (ocr_mode == 'auto' and (not regular_text.strip() or len(regular_text) < 100))
+        )
+        
+        # Run OCR if needed
+        if should_use_ocr:
+            logger.info("Using OCR for text extraction")
+            try:
+                ocr_text = extract_text_with_ocr(pdf_bytes)
+                used_ocr = True
+            except Exception as e:
+                logger.error(f"OCR extraction failed: {e}")
+                # If regular extraction also failed, we have no text
+                if not regular_text:
+                    return jsonify({"error": "Failed to extract text with both regular and OCR methods"}), 500
+        
+        # Choose the best text
+        final_text = ocr_text if used_ocr and ocr_text.strip() else regular_text
+        
+        if not final_text.strip():
             logger.warning("No text extracted from PDF")
             return jsonify({
                 "text": "",
-                "warning": "No text could be extracted from the PDF"
+                "warning": "No text could be extracted from the PDF",
+                "used_ocr": used_ocr
             })
             
-        logger.info(f"Successfully extracted {len(text)} characters")
+        logger.info(f"Successfully extracted {len(final_text)} characters")
         
         return jsonify({
-            "text": text,
-            "characters": len(text)
+            "text": final_text,
+            "characters": len(final_text),
+            "used_ocr": used_ocr
         })
         
     except Exception as e:
