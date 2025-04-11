@@ -18,9 +18,7 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-# Configure CORS with more specific options to fix cross-origin issues
-CORS(app, resources={r"/*": {"origins": "*"}}, methods=["GET", "POST", "OPTIONS"], 
-     allow_headers=["Content-Type", "Authorization"], supports_credentials=True)
+CORS(app)  # Enable CORS for all routes
 
 @app.route('/', methods=['GET'])
 def home():
@@ -123,15 +121,13 @@ def extract_pdf():
         # Check if request has JSON data
         if not request.is_json:
             logger.error("Request is not JSON")
-            response = jsonify({"error": "Request must be JSON with a base64-encoded file"}), 400
-            return add_cors_headers(response)
+            return jsonify({"error": "Request must be JSON with a base64-encoded file"}), 400
         
         # Get base64 encoded PDF or image from request
         file_base64 = request.json.get('pdf')
         if not file_base64:
             logger.error("No file data found in request")
-            response = jsonify({"error": "No file data found in request"}), 400
-            return add_cors_headers(response)
+            return jsonify({"error": "No file data found in request"}), 400
         
         # Get OCR preference (default to auto)
         ocr_mode = request.json.get('ocr_mode', 'auto')  # Options: 'auto', 'force', 'disable'
@@ -144,8 +140,7 @@ def extract_pdf():
             file_bytes = base64.b64decode(file_base64)
         except Exception as e:
             logger.error(f"Failed to decode base64: {e}")
-            response = jsonify({"error": "Invalid base64 encoding"}), 400
-            return add_cors_headers(response)
+            return jsonify({"error": "Invalid base64 encoding"}), 400
         
         # Check if it's an image
         is_image = is_image_data(file_bytes, file_type)
@@ -157,17 +152,15 @@ def extract_pdf():
                 
                 logger.info(f"Successfully extracted {len(text)} characters from image using OCR")
                 
-                response = jsonify({
+                return jsonify({
                     "text": text,
                     "characters": len(text),
                     "used_ocr": True,
                     "file_type": "image"
                 })
-                return add_cors_headers(response)
             except Exception as e:
                 logger.error(f"Error extracting text from image: {e}")
-                response = jsonify({"error": f"Failed to extract text from image: {str(e)}"}), 500
-                return add_cors_headers(response)
+                return jsonify({"error": f"Failed to extract text from image: {str(e)}"}), 500
         
         # If not an image, process as PDF
         regular_text = ""
@@ -209,59 +202,32 @@ def extract_pdf():
                 logger.error(f"OCR extraction failed: {e}")
                 # If regular extraction also failed, we have no text
                 if not regular_text:
-                    response = jsonify({"error": "Failed to extract text with both regular and OCR methods"}), 500
-                    return add_cors_headers(response)
+                    return jsonify({"error": "Failed to extract text with both regular and OCR methods"}), 500
         
         # Choose the best text
         final_text = ocr_text if used_ocr and ocr_text.strip() else regular_text
         
         if not final_text.strip():
             logger.warning("No text extracted from PDF")
-            response = jsonify({
+            return jsonify({
                 "text": "",
                 "warning": "No text could be extracted from the PDF",
                 "used_ocr": used_ocr,
                 "file_type": "pdf"
             })
-            return add_cors_headers(response)
             
         logger.info(f"Successfully extracted {len(final_text)} characters")
         
-        response = jsonify({
+        return jsonify({
             "text": final_text,
             "characters": len(final_text),
             "used_ocr": used_ocr,
             "file_type": "pdf"
         })
-        return add_cors_headers(response)
         
     except Exception as e:
         logger.error(f"Extraction error: {e}", exc_info=True)
-        response = jsonify({"error": str(e)}), 500
-        return add_cors_headers(response)
-
-# Helper function to add CORS headers to any response
-def add_cors_headers(response):
-    if isinstance(response, tuple):
-        response_obj, status_code = response
-        response_obj.headers.add('Access-Control-Allow-Origin', '*')
-        response_obj.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-        response_obj.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-        return response_obj, status_code
-    else:
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-        return response
-
-# Add a special route for preflight requests
-@app.route('/extract-pdf', methods=['OPTIONS'])
-def options_handler():
-    response = jsonify({'status': 'ok'})
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-    return response
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
